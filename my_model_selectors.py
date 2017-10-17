@@ -76,8 +76,45 @@ class SelectorBIC(ModelSelector):
         """
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        all_model_res = {}
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            #print('Select num_components %s' % num_components)
+            model_res = {}
+
+            model = None
+            try:
+                model = self.base_model(num_components)
+            except Exception as e:
+                #print('exception %s for model using num_components %s' % (str(e), num_components))
+                pass
+
+            if model:
+                try:
+                    logL = model.score(self.X, self.lengths)
+                except Exception as e:
+                    #print('exception %s for model using num_components %s for word %s' % (str(e), num_components, self.this_word))
+                    logL = float('-inf')
+                # num_params in HMMS?
+                # https://stats.stackexchange.com/questions/12341/number-of-parameters-in-markov-model
+                # http://www.cs.cmu.edu/~aarti/Class/10601/homeworks/hw5_Solution.pdf
+                # NOTE: self.legths is the number of observations (m)
+                # "Free parameters" are parameters that are learned by the model and it is a sum of:
+                # 1. The free transition probability parameters, which is the size of the transmat matrix less one row because they add up to 1 and therefore the final row is deterministic, so `n*(n-1)`
+                # 2. The free starting probabilities, which is the size of startprob minus 1 because it adds to 1.0 and last one can be calculated so `n-1`
+                # 3. Number of means, which is `n*f`
+                # 4. Number of covariances which is the size of the covars matrix, which for "diag" is `n*f`
+                # n^2 + 2*n*f - 1
+                # p = num_components + num_components**2 + num_components * len(self.lengths)
+                p = num_components**2 + 2*(num_components)*model.n_features - 1
+                logN = math.log(len(self.X))
+                BIC = -2 * logL + p * logN
+                all_model_res[model] = BIC,logL
+
+        if all_model_res:
+            # implement model selection using BIC (min is better)
+            best = min(all_model_res.items(), key=lambda x: x[1][0])
+            #print('best model is logL %s with components %s' % (best[1][1], best[0].n_components))
+            return best[0]
 
 
 class SelectorDIC(ModelSelector):
@@ -89,12 +126,52 @@ class SelectorDIC(ModelSelector):
     https://pdfs.semanticscholar.org/ed3d/7c4a5f607201f3848d4c02dd9ba17c791fc2.pdf
     DIC = log(P(X(i)) - 1/(M-1)SUM(log(P(X(all but i))
     '''
-
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        all_model_res = {}
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            #print('Select num_components %s' % num_components)
+            model_res = {}
+
+            model = None
+            try:
+                model = self.base_model(num_components)
+            except Exception as e:
+                #print('exception %s for model using num_components %s' % (str(e), num_components))
+                pass
+
+            if model:
+                try:
+                    logL = model.score(self.X, self.lengths)
+                except Exception as e:
+                    #print('exception %s for model using num_components %s for word %s' % (str(e), num_components, self.this_word))
+                    logL = float('-inf')
+
+                # DIC = log(P(X(i)) - 1/(M-1)SUM(log(P(X(all but i))
+                # we need to calculate the LogL of the rest of the words and sum it.
+                M = len(self.words.keys())
+                other_words = set(self.words.keys()) - set([self.this_word,])
+                sum_logL = 0
+                for other_word in other_words:
+                    other_X, other_lengths = self.hwords[other_word]
+                    other_logL = 0
+                    try:
+                        other_logL = model.score(other_X, other_lengths)
+                    except Exception as e:
+                        #print('exception %s for model using num_components %s for word %s' % (str(e), num_components, self.this_word))
+                        other_logL = float('-inf')
+
+                    sum_logL += other_logL
+
+                if sum_logL != 0:
+                    DIC = logL - 1 / ((M - 1) * (sum_logL))
+                    all_model_res[model] = DIC,logL
+
+        # implement model selection using DIC (max is better)
+        best = max(all_model_res.items(), key=lambda x: x[1][0])
+        #print('best model is logL %s with components %s' % (best[1][1], best[0].n_components))
+        return best[0]
 
 
 class SelectorCV(ModelSelector):
@@ -105,5 +182,49 @@ class SelectorCV(ModelSelector):
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        split_method = KFold()
+        try:
+            split_iter = split_method.split(self.sequences)
+            list(split_iter)
+        except ValueError as e:
+            #print("exception in Kflod %s we'll use base_model" % str(e))
+            best_num_components = self.n_constant
+            return self.base_model(best_num_components)
+        split_iter = split_method.split(self.sequences)
+
+        all_model_res = {}
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            #print('Select num_components %s' % num_components)
+            model_res = {}
+
+            for cv_train_idx, cv_test_idx in split_iter:
+
+                self.X, self.lengths = combine_sequences(cv_train_idx, self.sequences)
+
+                model = None
+                try:
+                    model = self.base_model(num_components)
+                except Exception as e:
+                    #print('exception %s for model using num_components %s' % (str(e), num_components))
+                    pass
+
+                if model:
+                    X_test, lengths_test = combine_sequences(cv_test_idx, self.sequences)
+                    try:
+                        logL = model.score(X_test, lengths_test)
+                    except Exception as e:
+                        #print('exception %s for model using num_components %s for word %s' % (str(e), num_components, self.this_word))
+                        logL = float('-inf')
+
+                    model_res[model] = logL
+                #print('got logL %s' % logL)
+
+            if model_res:
+                all_model_res[model] = sum(model_res.values()) / float(len(model_res.values()))
+
+        if all_model_res:
+            # implement model selection using CV
+            best = max(all_model_res.items(), key=lambda x: x[1])
+            #print('best model is logL %s with components %s' % (best[1], best[0].n_components))
+            return best[0]
+
